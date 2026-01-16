@@ -1,0 +1,177 @@
+- name: Ensure net.ipv4.ip_forward is set to 1
+  ansible.builtin.sysctl:
+    name: net.ipv4.ip_forward
+    value: '1'
+    state: present
+    reload: yes
+
+- name: Update apt package index
+  ansible.builtin.apt:
+    update_cache: yes
+  when: ansible_distribution == 'Ubuntu'
+
+- name: Update YUM package index
+  ansible.builtin.yum:
+    update_cache: yes
+  when: ansible_os_family.lower() == 'redhat' and ansible_distribution_major_version >= '9' 
+
+- name: Ensure required packages are installed
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gpg
+      - bash-completion
+    state: present
+  when: ansible_distribution == 'Ubuntu'
+
+- name: Ensure required packages are installed on RedHat
+  ansible.builtin.yum:
+    name:
+      - yum-utils
+      - ca-certificates
+      - curl
+      - gnupg2
+      - bash-completion
+    state: present
+  when: ansible_os_family.lower() == 'redhat' and ansible_distribution_major_version >= '9' 
+
+# - name: Ensure zsh is installed
+#   ansible.builtin.package:
+#     name: zsh
+#     state: present
+
+# - name: Change default shell to zsh for the current user
+#   ansible.builtin.shell: chsh -s /bin/zsh {{ ansible_user }}
+
+# - name: Install Oh My Zsh
+#   ansible.builtin.git:
+#     repo: https://github.com/ohmyzsh/ohmyzsh.git
+#     dest: /home/{{ ansible_user }}/.oh-my-zsh
+#     version: master
+#   become: yes
+#   become_user: "{{ ansible_user }}"
+
+# - name: Copy the default .zshrc provided by Oh My Zsh
+#   ansible.builtin.copy:
+#     src: /home/{{ ansible_user }}/.oh-my-zsh/templates/zshrc.zsh-template
+#     dest: /home/{{ ansible_user }}/.zshrc
+#     remote_src: yes
+#   become: yes
+#   become_user: "{{ ansible_user }}"
+- block:
+  - name: "[client]: Add Kubernetes GPG key"
+    rpm_key:
+      state: present
+      key: https://packages.cloud.google.com/yum/doc/yum-key.gpg
+
+  - name: "[client]: Add Kubernetes repository"
+    ansible.builtin.yum_repository:
+      name: kubernetes
+      description: Kubernetes
+      baseurl: "https://pkgs.k8s.io/core:/stable:/{{ kub_package_version }}/rpm/"
+      gpgcheck: 1
+      repo_gpgcheck: 1
+      gpgkey: "https://pkgs.k8s.io/core:/stable:/{{ kub_package_version }}/rpm/repodata/repomd.xml.key"
+      enabled: yes
+
+  - name: "[client]: Update YUM package index after adding Kubernetes repository"
+    ansible.builtin.yum:
+      update_cache: yes
+
+  - name: "[client]: Install Kubernetes tools (kubelet, kubeadm, kubectl)"
+    ansible.builtin.yum:
+      name:
+        - kubectl
+        - python3-dnf-plugin-versionlock
+      state: present
+
+  - name: "[client]: Hold Kubernetes tools (kubelet, kubeadm, kubectl)"
+    ansible.builtin.command: yum versionlock add kubelet kubeadm kubectl
+
+  - name: "[client]: Add Docker repository"
+    get_url:
+      url: https://download.docker.com/linux/centos/docker-ce.repo
+      dest: /etc/yum.repos.d/docker-ce.repo
+
+  - name: "[client]: Update YUM package index after adding Docker repository"
+    ansible.builtin.yum:
+      update_cache: yes
+
+  when: ansible_os_family.lower() == 'redhat' and ansible_distribution_major_version >= '9' 
+
+- block:
+  - name: "[client]: Download Kubernetes package signing key"
+    get_url:
+      url: "https://pkgs.k8s.io/core:/stable:/{{ kub_package_version }}/deb/Release.key"
+      dest: /tmp/kubernetes-release.key
+      mode: '0644'
+
+  - name: "[client]: Create directory for keyring if it doesn't exist"
+    file:
+      path: /etc/apt/keyrings
+      state: directory
+      mode: '0755'
+
+  - name: "[client]: Convert the signing key to GPG keyring format"
+    command: >
+      gpg --dearmor
+      --output /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      /tmp/kubernetes-release.key
+    args:
+      creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+  - name: "[client]: Remove the downloaded raw key file"
+    file:
+      path: /tmp/kubernetes-release.key
+      state: absent
+
+  - name: "[client]: Add Kubernetes APT source"
+    ansible.builtin.lineinfile:
+      path: /etc/apt/sources.list.d/kubernetes.list
+      line: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ kub_package_version }}/deb/ /"
+      create: yes
+
+  - name: "[client]: Update apt package index after adding Kubernetes repository"
+    ansible.builtin.apt:
+      update_cache: yes
+
+  - name: "[client]: Install Kubernetes tools (kubelet, kubeadm, kubectl)"
+    ansible.builtin.apt:
+      name:
+        - kubectl
+      state: present
+
+  - name: "[client]: Hold Kubernetes tools (kubelet, kubeadm, kubectl)"
+    ansible.builtin.command: apt-mark hold kubelet kubeadm kubectl
+
+  when: ansible_distribution == 'Ubuntu'
+
+
+
+- name: "[client] - generate bash completion"
+  shell: >
+    kubectl completion bash > /etc/bash_completion.d/kubectl
+
+- name: "[client] - Get Kubernetes version for [CNI: Weave] installation."
+  shell: kubectl version | head -n 1 | awk '{print $3}' | cut -d. -f1,2
+  changed_when: false
+  register: kubectl_version
+  when: kubernetes_pod_network_cni == 'weave'
+  until: kubectl_version is not failed
+  retries: 12
+  delay: 5
+
+- name: "[client] - Configure Weave networking."
+  shell: >
+    kubectl apply -f https://reweave.azurewebsites.net/k8s/{{ kubectl_version.stdout }}/net.yaml
+  register: weave_result
+  changed_when: "'created' in weave_result.stdout"
+  when: kubernetes_pod_network_cni == 'weave'
+  until: weave_result is succeeded
+
+- name: "[client] - Import kubernetes ca into java keystore"
+  shell: >
+    {{ java_bin_dir }}/keytool -noprompt -import -trustcacerts -alias kubernetes-ca -file /etc/kubernetes/pki/ca.crt -keystore {{ java_keystore_system_path }} -storepass changeit
+  ignore_errors: yes

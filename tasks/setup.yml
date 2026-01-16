@@ -1,0 +1,223 @@
+
+- name: Disable swap
+  command: swapoff -a
+
+- set_fact:
+    _k8s_api_advertise_address: "{{ hosts | selectattr('fqdn', 'equalto', inventory_hostname) | map(attribute='ip') | first }}"
+    _k8s_pod_network_cidr: "{{ k8s_pod_network_cidr | default('10.244.0.0/16') }}"
+    _k8s_service_cidr: "{{ k8s_service_cidr | default('10.96.0.0/12') }}"
+    _k8s_control_plane_endpoint: "{{ k8s_controlplane_endpoint_hostname | default('') }}"
+
+- name: Ensure entry for k8s_controlplane_endpoint_hostname exists in /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^{{k8s_controlplane_endpoint_ip}}'
+    line: "{{ host_line }}"
+    state: present
+
+- name: Check if kube-scheduler manifest exists
+  stat:
+    path: /etc/kubernetes/manifests/kube-scheduler.yaml
+  register: kube_scheduler_manifest
+
+- name: Generate kube-adm config
+  template:
+    src: kubadm-config.yml.j2
+    dest: /root/kubeadm-config.yaml
+
+- name: "[Bootstrap Kubernetes] - CA"
+  shell: >
+     kubeadm init phase certs ca
+  when: inventory_hostname == "{{ k8s_masters | first }}"
+
+- name: "[Kubelet not first] - Download Kubernetes ca.crt and ca.key"
+  fetch:
+    src: "/etc/kubernetes/pki/{{ item }}"
+    dest: /tmp/pki/{{ item }}
+    flat: yes
+  when: inventory_hostname != "{{ k8s_masters | first }}" and inventory_hostname in k8s_masters
+  delegate_to: "{{ k8s_masters | first }}"
+  with_items:
+    - ca.crt
+    - ca.key
+
+- name: create /etc/kubernetes/pki directory
+  file:
+    dest: /etc/kubernetes/pki
+    state: directory
+
+- name: "[Kubelet not first] - Upload Kubernetes PKI ca.crt"
+  copy:
+    dest: "/etc/kubernetes/pki/{{ item }}"
+    src: /tmp/pki/{{ item }}
+  when: inventory_hostname != "{{ k8s_masters | first }}" and inventory_hostname in k8s_masters
+  with_items:
+    - ca.crt
+    - ca.key
+
+- name: "[Bootstrap Node] - Pull image before"
+  shell: >
+    kubeadm config images pull --config /root/kubeadm-config.yaml
+  when: inventory_hostname in k8s_masters or inventory_hostname in k8s_workers
+
+# - name: "[Bootstrap Kubelet] - Start"
+#   shell: >
+#      kubeadm init phase kubelet-start --config /root/kubeadm-config.yaml
+#   when: inventory_hostname in k8s_masters
+
+# - name: "[Bootstrap Kubernetes] - Kubeconfig"
+#   shell: >
+#      kubeadm init phase kubeconfig kubelet --config /root/kubeadm-config.yaml
+#   when: inventory_hostname in k8s_masters
+
+# - name: "[Bootstrap Kubernetes] - Check that ETCD is ok"
+#   shell: >
+#      ETCDCTL_API=3 /usr/local/bin/etcd/etcdctl \
+#       --cert /etc/kubernetes/pki/etcd/peer.crt \
+#       --key /etc/kubernetes/pki/etcd/peer.key \
+#       --cacert /etc/kubernetes/pki/etcd/ca.crt \
+#       --endpoints https://{{inventory_hostname}}:2379 endpoint health
+#   when: inventory_hostname in k8s_masters
+#   retries: 60
+#   register: result
+#   until: result.stdout.find('is healthy') != -1
+
+- name: Initialize Kubernetes cluster
+  command: kubeadm init --config /root/kubeadm-config.yaml --upload-certs --node-name {{ inventory_hostname }} #--ignore-preflight-errors=FileAvailable--etc-kubernetes-manifests-etcd.yaml,Port-10250
+  register: kubeadm_init
+  when: inventory_hostname == "{{ k8s_masters | first }}" and not kube_scheduler_manifest.stat.exists
+
+- name: Print the init output to screen to add other nodes
+  debug:
+    var: kubeadm_init.stdout
+    verbosity: 2
+  when: inventory_hostname == "{{ k8s_masters | first }}" and not kube_scheduler_manifest.stat.exists
+
+- name: Write kubeadm init output to a file
+  copy:
+    content: "{{ kubeadm_init.stdout }}"
+    dest: /tmp/kubeadm_init_output.txt
+  when: inventory_hostname == "{{ k8s_masters | first }}" and not kube_scheduler_manifest.stat.exists
+
+- name: Wait for Kubernetes API server to be running
+  uri:
+    url: "https://{{ k8s_masters | first }}:6443/healthz"
+    method: GET
+    validate_certs: no
+  register: result
+  until: result.status == 200
+  retries: 10
+  delay: 15
+  when: inventory_hostname != "{{ k8s_masters | first }}"
+
+- name: Download Kubernetes admin.conf from first master
+  fetch:
+    src: /tmp/kubeadm_init_output.txt
+    dest: /tmp/kubeadm_init_output.txt
+    flat: yes
+  delegate_to: "{{ k8s_masters | first }}"
+
+- name: Upload Kube adm init output to all hosts
+  copy:
+    src: /tmp/kubeadm_init_output.txt
+    dest: /tmp/kubeadm_init_output.txt
+  when: inventory_hostname != "{{ k8s_masters | first }}" and inventory_hostname in k8s_workers
+
+- name: "[kube-worker] Extract kubeadm join command"
+  shell: |
+    grep -A 2 "kubeadm join" /tmp/kubeadm_init_output.txt | tail -n2
+  register: kubeadm_join_worker
+  when: inventory_hostname in k8s_workers
+
+- name: "[kube-all-nodes] - Upload /tmp/kubeadm_init_output.txt"
+  copy:
+    src: /tmp/kubeadm_init_output.txt
+    dest: /tmp/kubeadm_init_output.txt
+  when: inventory_hostname != "{{ k8s_masters | first }}" and inventory_hostname in k8s_masters
+
+- name: "[kube-controlplane] Extract kubeadm join command"
+  shell: |
+    grep -A 2 "kubeadm join" /tmp/kubeadm_init_output.txt | head -n3
+  register: kubeadm_join_cp
+  when: inventory_hostname != "{{ k8s_masters | first }}" and inventory_hostname in k8s_masters
+
+- name: Download Kubernetes admin.conf from first master
+  fetch:
+    src: /etc/kubernetes/admin.conf
+    dest: /tmp/admin.conf
+    flat: yes
+  delegate_to: "{{ k8s_masters | first }}"
+
+- name: create ~/.kube directory
+  file:
+    dest: /root/.kube
+    state: directory
+
+- name: "[kube-all-nodes] - Upload the kubectl admin.conf"
+  copy:
+    src: /tmp/admin.conf
+    dest: /root/.kube/config
+  when: inventory_hostname != "{{ k8s_masters | first }}"
+
+- name: "[kube-all-nodes] - Symlink the kubectl admin.conf to ~/.kube/conf."
+  file:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    state: link
+    mode: 0644
+  when: inventory_hostname == "{{ k8s_masters | first }}"
+
+- name: Check if node is already part of the cluster
+  shell: kubectl get nodes --no-headers -o custom-columns=:.metadata.name
+  register: kubectl_get_nodes
+  failed_when: false
+  changed_when: false
+  ignore_errors: true
+  when: inventory_hostname in k8s_masters or inventory_hostname in k8s_workers
+
+- name: Set fact if node is already joined
+  set_fact:
+    node_already_joined: "{{inventory_hostname in kubectl_get_nodes.stdout_lines}}"
+  when: kubectl_get_nodes is succeeded and kubectl_get_nodes.stdout_lines is defined
+  
+- name: "[kube-controlplane] - Join Kubernetes cluster as controlplane node"
+  shell: |
+    {{kubeadm_join_cp.stdout}} --apiserver-advertise-address {{ hosts | selectattr('fqdn', 'equalto', inventory_hostname) | map(attribute='ip') | first }}
+  when: node_already_joined is defined and not node_already_joined and inventory_hostname != "{{ k8s_masters | first }}" and not kube_scheduler_manifest.stat.exists and inventory_hostname in k8s_masters
+
+- debug:
+    msg: "{{node_already_joined}} - {{inventory_hostname}} != {{ k8s_masters | first }}"
+  when: node_already_joined is defined
+
+- name: "[kube-controlplane] - Join Kubernetes cluster as worker node"
+  shell: |
+    {{kubeadm_join_worker.stdout}} --apiserver-advertise-address {{ hosts | selectattr('fqdn', 'equalto', inventory_hostname) | map(attribute='ip') | first }} --node-name {{ inventory_hostname }}
+  when: node_already_joined is defined and not node_already_joined and inventory_hostname != "{{ k8s_masters | first }}" and not kube_scheduler_manifest.stat.exists and inventory_hostname in k8s_workers
+
+- name: "[kube-all-nodes] - generate bash completion"
+  shell: >
+    kubectl completion bash > /etc/bash_completion.d/kubectl
+  when: not ((not(inventory_hostname in k8s_masters)) and (not (inventory_hostname in k8s_workers)))
+
+- name: "[kube-all-nodes] - Get Kubernetes version for [CNI: Weave] installation."
+  shell: kubectl version | head -n 1 | awk '{print $3}' | cut -d. -f1,2
+  changed_when: false
+  register: kubectl_version
+  when: kubernetes_pod_network_cni == 'weave' and not((not(inventory_hostname in k8s_masters)) and (not (inventory_hostname in k8s_workers)))
+  until: kubectl_version is not failed
+  retries: 12
+  delay: 5
+
+- name: Configure Weave networking.
+  shell: >
+    kubectl apply -f https://reweave.azurewebsites.net/k8s/{{ kubectl_version.stdout }}/net.yaml
+  register: weave_result
+  changed_when: "'created' in weave_result.stdout"
+  when: kubernetes_pod_network_cni == 'weave' and not((not(inventory_hostname in k8s_masters)) and (not (inventory_hostname in k8s_workers)))
+  until: weave_result is succeeded
+
+- name: Import kubernetes ca into java keystore
+  shell: >
+    {{ java_bin_dir }}/keytool -noprompt -import -trustcacerts -alias kubernetes-ca -file /etc/kubernetes/pki/ca.crt -keystore {{ java_keystore_system_path }} -storepass changeit
+  when: inventory_hostname in k8s_masters and not((not(inventory_hostname in k8s_masters)) and (not (inventory_hostname in k8s_workers)))
+  ignore_errors: yes

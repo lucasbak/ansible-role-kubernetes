@@ -1,0 +1,37 @@
+---
+apiVersion: "kubeadm.k8s.io/v1beta4"
+kind: InitConfiguration
+nodeRegistration:
+    name: {{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='fqdn') | first }}
+localAPIEndpoint:
+    advertiseAddress: {{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='ip') | first }}
+---
+{% set filtered_hosts = hosts | selectattr('fqdn', 'in', k8s_masters) | list %}
+apiVersion: "kubeadm.k8s.io/v1beta4"
+kind: ClusterConfiguration
+etcd:
+    local:
+        serverCertSANs:
+        - "{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='ip') | first }}"
+        - "{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='fqdn') | first }}"
+        - "{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='shortname') | first }}"
+        peerCertSANs:
+        - "{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='ip') | first }}"
+        - "{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='ip') | first }}"
+        - "{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='fqdn') | first }}"
+        - "{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='shortname') | first }}"
+        extraArgs:
+        - name: initial-cluster
+          value: "{{ etcd_initial_cluster }}"
+        - name: initial-cluster-state
+          value: new
+        - name: name
+          value: {{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='fqdn') | first }}
+        - name: listen-peer-urls
+          value: https://{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='ip') | first }}:2380
+        - name: listen-client-urls
+          value: https://{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='ip') | first }}:2379
+        - name: advertise-client-urls
+          value: https://{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='ip') | first }}:2379
+        - name: initial-advertise-peer-urls
+          value: https://{{ hosts | selectattr('fqdn', 'equalto', item) | map(attribute='ip') | first }}:2380

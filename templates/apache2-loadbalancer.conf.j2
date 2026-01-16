@@ -1,0 +1,25 @@
+<Proxy "balancer://k8s_control_plane">
+    {% for host in hosts %}
+    {% if host.fqdn not in k8s_masters %}
+    BalancerMember http://{{ host.shortname }}:{{ k8s_http_port }}
+        {% endif %}
+    {% endfor %}
+    ProxySet lbmethod=byrequests
+</Proxy>
+
+
+<VirtualHost {{ k8s_controlplane_endpoint_hostname }}:{{ k8s_http_port }}>
+    ProxyPreserveHost On
+    ProxyPass / balancer://k8s_control_plane/
+    ProxyPassReverse / balancer://k8s_control_plane/
+    ErrorLog {{ apache_log_dir }}/error.log
+    CustomLog {{ apache_log_dir }}/access.log combined
+</VirtualHost>
+
+<VirtualHost {{ loadbalancer_server }}:{{ k8s_http_port }}>
+    ProxyPreserveHost On
+    ProxyPass / balancer://k8s_control_plane/
+    ProxyPassReverse / balancer://k8s_control_plane/
+    ErrorLog {{ apache_log_dir }}/error.log
+    CustomLog {{ apache_log_dir }}/access.log combined
+</VirtualHost>

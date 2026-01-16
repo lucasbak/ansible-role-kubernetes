@@ -1,0 +1,120 @@
+# tasks/install_ingress_nginx.yaml
+# Minimal + deterministic: installs ingress-nginx with your static values.
+# No discovery/guessing. Optional validation ensures the Service matches your values.
+
+- name: "ingress-nginx: Ensure ingress-nginx namespace exists"
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: "{{ ingress_nginx_namespace }}"
+    state: present
+
+- name: "ingress-nginx: Add ingress-nginx Helm repository"
+  kubernetes.core.helm_repository:
+    name: ingress-nginx
+    repo_url: "{{ ingress_nginx_repo_url }}"
+
+- name: "ingress-nginx: Write ingress-nginx Helm values (static)"
+  ansible.builtin.copy:
+    dest: "{{ ingress_nginx_values_file }}"
+    mode: "0600"
+    content: "{{ ingress_nginx_values | to_nice_yaml(indent=2) }}"
+
+- name: "ingress-nginx: Install / Upgrade ingress-nginx (NodePort)"
+  kubernetes.core.helm:
+    name: "{{ ingress_nginx_release_name }}"
+    chart_ref: "ingress-nginx/ingress-nginx"
+    chart_version: "{{ ingress_nginx_chart_version }}"
+    release_namespace: "{{ ingress_nginx_namespace }}"
+    create_namespace: false
+    values_files:
+      - "{{ ingress_nginx_values_file }}"
+    wait: true
+    wait_timeout: "{{ ingress_nginx_wait_timeout }}"
+    atomic: true
+    state: present
+
+- name: "ingress-nginx: Wait for controller Deployment to be Ready"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ ingress_nginx_namespace }}"
+    name: "{{ ingress_nginx_release_name }}-ingress-nginx-controller"
+  register: _ing
+  until: >
+    (_ing.resources | length) > 0 and
+    (_ing.resources[0].status.readyReplicas | default(0)) >=
+    (_ing.resources[0].spec.replicas | default(1))
+  retries: 40
+  delay: 8
+
+# ── Optional, but precise: verify the controller Service exposes your exact HTTPS NodePort ──
+# Get the controller Service (you likely already have _svc; harmless to run twice)
+- name: "ingress-nginx: Fetch controller Service"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Service
+    namespace: "{{ ingress_nginx_namespace }}"
+    name: "{{ ingress_nginx_release_name }}-ingress-nginx-controller"
+  register: _svc
+
+# Find a Running controller pod to learn which node it's on
+- name: "ingress-nginx: Get controller Pods"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ ingress_nginx_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/instance={{ ingress_nginx_release_name }}"
+      - "app.kubernetes.io/component=controller"
+  register: _pods
+
+- name: "ingress-nginx: Pick nodeName of a Running controller pod"
+  ansible.builtin.set_fact:
+    _ctrl_node: "{{ (_pods.resources | selectattr('status.phase','equalto','Running') | list | first).spec.nodeName | default('') }}"
+
+- name: "ingress-nginx: Get that node object (to read InternalIP)"
+  when: _ctrl_node | length > 0
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+    name: "{{ _ctrl_node }}"
+  register: _node
+
+- name: "ingress-nginx: Derive controller node InternalIP (fallback later if empty)"
+  ansible.builtin.set_fact:
+    ingress_node_ip: >-
+      {{
+        (
+          _node.resources[0].status.addresses
+          | selectattr('type','equalto','InternalIP')
+          | map(attribute='address') | list | first
+        )
+        if (_node is defined and _node.resources | length > 0) else ''
+      }}
+
+# Fallback: pick any node InternalIP if we couldn't resolve the controller node
+- name: "ingress-nginx: Fallback to any node InternalIP"
+  when: ingress_node_ip | length == 0
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+  register: _allnodes
+
+- name: "ingress-nginx: Set fallback node IP"
+  when: ingress_node_ip | length == 0
+  ansible.builtin.set_fact:
+    ingress_node_ip: >-
+      {{
+        _allnodes.resources
+        | map('json_query',"status.addresses[?type=='InternalIP'].address | [0]")
+        | select('string') | list | first
+      }}
+
+# Use the NodePort you configured in values (no guessing)
+- name: "ingress-nginx: Show exact ProxyPass lines for Apache"
+  ansible.builtin.debug:
+    msg:
+      - "Use these in your vhost:"
+      - "ProxyPass        / https://{{ ingress_node_ip }}:{{ ingress_nginx_nodeport_https }}/ nocanon"
+      - "ProxyPassReverse / https://{{ ingress_node_ip }}:{{ ingress_nginx_nodeport_https }}/"

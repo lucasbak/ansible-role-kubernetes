@@ -1,0 +1,13 @@
+- name: Reload Apache on Debian
+  listen: reload httpd
+  ansible.builtin.service:
+    name: apache2
+    state: reloaded
+  when: ansible_os_family == "Debian"
+
+- name: Reload Apache on RHEL
+  listen: reload httpd
+  ansible.builtin.service:
+    name: httpd
+    state: reloaded
+  when: ansible_os_family == "RedHat"

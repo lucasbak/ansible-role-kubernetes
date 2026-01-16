@@ -1,0 +1,43 @@
+- set_fact:
+    ips: "{{ hosts | map(attribute='ip')| list}}"
+
+- set_fact:
+    host_line: "{{ k8s_controlplane_endpoint_ip }} {{ k8s_controlplane_endpoint_hostname }}"
+  when: k8s_controlplane_endpoint_ip not in ips
+
+- set_fact:
+    host_line: "{{ k8s_controlplane_endpoint_ip }} {{ hosts | selectattr('ip', 'equalto', k8s_controlplane_endpoint_ip) | map(attribute='shortname') | first }} {{ hosts | selectattr('ip', 'equalto', k8s_controlplane_endpoint_ip) | map(attribute='fqdn') | first }}  {{ k8s_controlplane_endpoint_hostname }}"
+  when: k8s_controlplane_endpoint_ip in ips
+
+- import_tasks: install_haproxy.yml
+  when: inventory_hostname == "{{ loadbalancer_server }}" and loadbalancer_method == "haproxy"
+
+- import_tasks: install_apache2.yml
+  when: inventory_hostname == "{{ loadbalancer_server }}" and loadbalancer_method == "apache2"
+
+- import_tasks: install.yml
+  when: inventory_hostname in k8s_masters or inventory_hostname in k8s_workers
+
+- import_tasks: etcd.yml
+  when: inventory_hostname in k8s_masters
+
+- import_tasks: setup.yml
+
+- import_tasks: install_helm.yml
+  when: inventory_hostname == "{{ k8s_masters | first }}"
+
+- import_tasks: install_metallb.yml
+  when: inventory_hostname == "{{ k8s_masters | first }}"
+
+- import_tasks: install_metrics_server.yml
+  when: inventory_hostname == "{{ k8s_masters | first }}"
+
+- import_tasks: install_ingress_controller.yml
+  when: inventory_hostname == "{{ k8s_masters | first }}" and ingress_nginx_enabled
+
+- import_tasks: install_localpath_provisioner.yml
+  when: inventory_hostname == "{{ k8s_masters | first }}" and localpath_provisioner_enabled
+
+- import_tasks: client.yml
+  when: (not(inventory_hostname in k8s_masters)) and (not (inventory_hostname in k8s_workers))
+

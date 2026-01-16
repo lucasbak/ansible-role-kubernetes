@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spark-test-k8s-executor
+spec:
+  securityContext:
+    runAsUser: 1001610000

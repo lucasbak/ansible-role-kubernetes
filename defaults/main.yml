@@ -1,0 +1,38 @@
+kub_version: v1.34.2
+kub_package_version: v1.34
+k8s_cert_dir: /etc/security/.ssl/kubernetes
+apache_log_dir: /var/log/apache2
+systemd_cgroup: "true"
+k8s_http_port: 80
+kubernetes_pod_network_cni: 'weave'
+etcd_conf_dir: /etc/etcd
+etcd_is_external: false
+loadbalancer_method: haproxy
+helm_version: v3.19.1
+rhel_httpd_modules:
+  - proxy
+  - proxy_http
+  - ssl
+  - headers
+  - rewrite
+  - lbmethod_byrequests
+  - proxy_balancer
+
+# map module -> LoadModule identifier + .so filename
+rhel_httpd_module_map:
+  proxy:                 { identifier: proxy_module,                 file: modules/mod_proxy.so }
+  proxy_http:            { identifier: proxy_http_module,            file: modules/mod_proxy_http.so }
+  ssl:                   { identifier: ssl_module,                   file: modules/mod_ssl.so }
+  headers:               { identifier: headers_module,               file: modules/mod_headers.so }
+  rewrite:               { identifier: rewrite_module,               file: modules/mod_rewrite.so }
+  proxy_balancer:        { identifier: proxy_balancer_module,        file: modules/mod_proxy_balancer.so }
+  lbmethod_byrequests:   { identifier: lbmethod_byrequests_module,   file: modules/mod_lbmethod_byrequests.so }
+
+metallb_namespace: "metallb-system"
+metallb_chart_version: ""              # optional pin, e.g., "0.14.8"
+metallb_address_pool_name: "default-pool"
+metallb_address_ranges:                # REQUIRED — free, non-DHCP IPs on your LAN
+  - "192.168.50.30-192.168.50.60"
+
+ingress_nginx_enabled: false
+localpath_provisioner_enabled: false

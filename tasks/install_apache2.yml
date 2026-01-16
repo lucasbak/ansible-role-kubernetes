@@ -1,0 +1,100 @@
+---
+- name: debug os
+  ansible.builtin.debug:
+    msg: "OS Family: {{ ansible_os_family }} - {{ ansible_facts.os_family }}"
+
+- name: Ensure Apache2 is installed and configured on Debian-based systems
+  block:
+    - name: Install Apache2
+      ansible.builtin.apt:
+        name: apache2
+        state: present
+
+    - name: Enable and start Apache2 service
+      ansible.builtin.systemd:
+        name: apache2
+        enabled: yes
+        state: started
+
+    - name: Enable necessary Apache modules
+      apache2_module:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - proxy
+        - proxy_http
+        - ssl
+        - headers
+        - rewrite
+        - lbmethod_byrequests
+        - proxy_balancer
+
+    - name: Configure Apache2
+      ansible.builtin.template:
+        src: apache2-loadbalancer.conf.j2
+        dest: /etc/apache2/sites-enabled/kubernetes-controlplane.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Enable and restart Apache2 service
+      ansible.builtin.systemd:
+        name: apache2
+        enabled: yes
+        state: restarted
+  when: ansible_os_family == 'Debian'
+
+- name: Ensure httpd is installed and configured on RedHat-based systems
+  block:
+    - name: Ensure Apache is installed (RHEL family)
+      ansible.builtin.package:
+        name: httpd
+        state: present
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Install mod_ssl if requested
+      ansible.builtin.package:
+        name: mod_ssl
+        state: present
+      when:
+        - ansible_facts.os_family == "RedHat"
+        - "'ssl' in rhel_httpd_modules"
+
+    - name: Enable requested httpd modules (create minimal conf files)
+      ansible.builtin.copy:
+        dest: "/etc/httpd/conf.modules.d/10-{{ item }}.conf"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          LoadModule {{ rhel_httpd_module_map[item].identifier }} {{ rhel_httpd_module_map[item].file }}
+      loop: "{{ rhel_httpd_modules }}"
+      when: ansible_facts.os_family == "RedHat"
+      notify: reload httpd
+
+    - ansible.builtin.stat:
+        path: /etc/httpd/conf.d/ssl.conf
+      register: ssl_conf_stat
+
+    - name: Remove default ssl.conf if it exists
+      ansible.builtin.file:
+        path: /etc/httpd/conf.d/ssl.conf
+        state: absent
+      when: ssl_conf_stat.stat.exists
+
+    - name: Validate Apache config syntax
+      ansible.builtin.command: httpd -t
+      register: httpd_configtest
+      changed_when: false
+      failed_when: httpd_configtest.rc != 0
+      when: ansible_facts.os_family == "RedHat"
+    
+    - name: Enable and start httpd service
+      ansible.builtin.systemd:
+        name: httpd
+        enabled: yes
+        state: started
+      
+  when: ansible_os_family == 'RedHat'
+

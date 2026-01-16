@@ -1,0 +1,154 @@
+- name: Generate kubeadmcdg.yaml
+  file:
+    dest: /tmp/{{ item }}
+    state: directory
+  with_items: "{{ k8s_masters }}"
+
+- name: Generate kubeadmcdg.yaml
+  template:
+    src: kubeadmcfg.yaml.j2
+    dest: /tmp/{{ item }}/kubeadmcfg.yaml
+  with_items: "{{ k8s_masters }}"
+  when: inventory_hostname in k8s_masters
+
+- name: kubeadm init phase certs etcd-ca
+  shell: |
+    kubeadm init phase certs etcd-ca
+  when: inventory_hostname == "{{ k8s_masters | first }}"
+
+- name: generate certificates for First etcd master
+  shell: |
+    kubeadm init phase certs etcd-server --config=/tmp/{{ item }}/kubeadmcfg.yaml
+    kubeadm init phase certs etcd-peer --config=/tmp/{{ item }}/kubeadmcfg.yaml 
+    kubeadm init phase certs etcd-healthcheck-client --config=/tmp/{{ item }}/kubeadmcfg.yaml
+    kubeadm init phase certs apiserver-etcd-client --config=/tmp/{{ item }}/kubeadmcfg.yaml
+    cp -r /etc/kubernetes/pki /tmp/{{ item }}/
+    find /etc/kubernetes/pki -not -name ca.crt -not -name ca.key -type f -delete
+  when: inventory_hostname == "{{ k8s_masters | first }}"
+  with_items: "{{ k8s_masters }}"
+
+- name: "put back on first master node pki certs"
+  shell: > 
+    cp -r /tmp/{{ inventory_hostname }}/pki/* /etc/kubernetes/pki/
+  when: inventory_hostname == "{{ k8s_masters | first }}"
+
+- name: fetch etcd certs
+  fetch:
+    src: /tmp/{{ inventory_hostname }}/pki/{{ item }}
+    dest: /tmp/{{ inventory_hostname }}/pki/{{ item }}
+    flat: yes
+  delegate_to: "{{ k8s_masters | first }}"
+  when: inventory_hostname in k8s_masters and inventory_hostname != "{{ k8s_masters | first }}"
+  with_items:
+    - etcd/ca.crt
+    - etcd/ca.key
+    - etcd/server.crt
+    - etcd/server.key
+    - etcd/peer.crt
+    - etcd/peer.key
+    - etcd/healthcheck-client.crt
+    - etcd/healthcheck-client.key
+
+- name: create kubernetes pki for etcd
+  file:
+    dest: /etc/kubernetes/pki/etcd
+    state: directory
+
+- name: upload etcd certs
+  copy:
+    src: /tmp/{{ inventory_hostname }}/pki/{{ item }}
+    dest: /etc/kubernetes/pki/{{ item }}
+  when: inventory_hostname in k8s_masters and inventory_hostname != "{{ k8s_masters | first }}"
+  with_items:
+    - etcd/ca.crt
+    - etcd/ca.key
+    - etcd/server.crt
+    - etcd/server.key
+    - etcd/peer.crt
+    - etcd/peer.key
+    - etcd/healthcheck-client.crt
+    - etcd/healthcheck-client.key
+
+# - name: Generate ETCD static pod manifest for kubelet
+#   shell: > 
+#     kubeadm init phase etcd local --config=/tmp/{{ inventory_hostname }}/kubeadmcfg.yaml
+
+- name: Install dependencies
+  package:
+    name: "{{ packages }}"
+  vars:
+    packages:
+      - wget
+      - tar
+      - openssl
+
+- name: Create etcd user
+  user:
+    name: etcd
+    state: present
+    shell: /bin/false
+    system: yes
+
+- name: Create directories for etcd
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: etcd
+    group: etcd
+    mode: '0755'
+  with_items:
+    - "{{ etcd_data_dir }}"
+    - "{{ etcd_cert_dir }}"
+    - "{{ etcd_conf_dir }}"
+  when: inventory_hostname in k8s_masters
+
+- name: Download etcd binaries
+  get_url:
+    url: "https://github.com/etcd-io/etcd/releases/download/{{ etcd_version }}/etcd-{{ etcd_version }}-linux-amd64.tar.gz"
+    dest: /tmp/etcd.tar.gz
+  when: inventory_hostname in k8s_masters
+
+- name: Create opt bin dir for etcd
+  file:
+    dest: /usr/local/bin/etcd
+    state: directory
+  when: inventory_hostname in k8s_masters
+
+- name: Extract etcd binaries
+  unarchive:
+    src: /tmp/etcd.tar.gz
+    dest: /usr/local/bin/etcd
+    remote_src: true
+    extra_opts: [--strip-components=1]
+  when: inventory_hostname in k8s_masters
+
+- name: Symlink the kubectl admin.conf to ~/.kube/conf.
+  file:
+    src: /usr/local/bin/etcd/etcdctl
+    dest: /usr/local/bin/etcdctl
+    state: link
+  when: inventory_hostname in k8s_masters
+
+- name: Symlink the kubectl admin.conf to ~/.kube/conf.
+  file:
+    dest: /usr/local/bin/etcdctl
+    mode: 0755
+  when: inventory_hostname in k8s_masters
+
+
+# # - name: Create etcd configuration file
+# #   template:
+# #     src: etcd.conf.yml.j2
+# #     dest: /etc/etcd/etcd.conf.yml
+
+# # - name: Create systemd service for etcd
+# #   template:
+# #     src: etcd-systemd.service.j2
+# #     dest: /usr/lib/systemd/system/etcd.service
+
+# # - name: Start and enable etcd
+# #   systemd:
+# #     name: etcd
+# #     state: started
+# #     enabled: true
+

@@ -1,0 +1,32 @@
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: "{{ _k8s_api_advertise_address }}"
+  bindPort: 6443
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: stable
+controlPlaneEndpoint: "{{ _k8s_control_plane_endpoint }}"
+networking:
+  serviceSubnet: "{{ _k8s_service_cidr }}"
+  podSubnet: "{{ _k8s_pod_network_cidr }}"
+  dnsDomain: "cluster.local"
+{% set filtered_hosts = hosts | selectattr('fqdn', 'in', k8s_masters) | list %}
+{% if etcd_is_external %}
+etcd:
+  external:
+    endpoints: 
+{% for host in filtered_hosts %}
+      - https://{{ host.ip }}:2379
+{% endfor %}
+    caFile: /etc/kubernetes/pki/etcd/ca.crt
+    certFile: /etc/kubernetes/pki/apiserver-etcd-client.crt
+    keyFile: /etc/kubernetes/pki/apiserver-etcd-client.key
+{% endif %}
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+mode: "ipvs" # Set the kube-proxy mode (e.g., "iptables", "ipvs")
+ipvs:
+  scheduler: "wrr" # Configure IPVS scheduler (e.g., "rr", "wrr", "lc")

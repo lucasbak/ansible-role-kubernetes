@@ -1,0 +1,54 @@
+- name: Check if Helm is installed
+  command: /usr/local/bin/helm version --short
+  register: helm_version_exists
+  ignore_errors: yes
+
+- name: Set Helm installed fact
+  set_fact:
+    helm_installed: "{{ '{{ helm_version }}' in helm_version_exists.stdout }}"
+
+- name: Set Helm architecture variable
+  set_fact:
+    helm_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+- name: Set Helm download URL
+  set_fact:
+    helm_url: "https://get.helm.sh/helm-{{ helm_version }}-linux-{{ helm_arch }}.tar.gz"
+
+- name: Download Helm binary
+  get_url:
+    url: "{{ helm_url }}"
+    dest: "/tmp/helm-{{ helm_version }}-linux-{{ helm_arch }}.tar.gz"
+  when: not helm_installed
+
+- name: create /opt/local/helm
+  file:
+    dest: /opt/local/helm
+    state: directory
+  when: not helm_installed
+
+- name: Extract Helm binary
+  shell: >
+      tar -xzf /tmp/helm-{{ helm_version }}-linux-{{ helm_arch }}.tar.gz --strip-components=1 -C /opt/local/helm/
+  when: not helm_installed
+
+- name: symlink /usr/local/bin/helm to /opt/local/helm/helm
+  file:
+    src: /opt/local/helm/helm
+    dest: /usr/local/sbin/helm
+    state: link
+
+- name: Ensure pip is present
+  package:
+    name: python3-pip
+    state: present
+  become: true
+
+- name: Install Python kubernetes client on remote
+  pip:
+    name:
+      - kubernetes>=24.2.0
+      - pyyaml
+      - requests
+    state: present
+  become: true

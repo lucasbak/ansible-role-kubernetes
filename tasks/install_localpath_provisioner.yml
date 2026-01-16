@@ -1,0 +1,31 @@
+- name: Install Local Path Provisioner
+  kubernetes.core.k8s:
+    state: present
+    # Using a specific version (v0.0.30) is safer for a vendor solution than 'master'
+    src: https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.30/deploy/local-path-storage.yaml
+
+- name: Wait for local-path StorageClass to be created
+  kubernetes.core.k8s_info:
+    kind: StorageClass
+    name: local-path
+  register: sc_result
+  until: sc_result.resources | length > 0
+  retries: 10
+  delay: 5
+
+- name: Patch local-path StorageClass to be default
+  kubernetes.core.k8s:
+    kind: StorageClass
+    name: local-path
+    definition:
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+
+- name: Verify local-path is now the default
+  kubernetes.core.k8s_info:
+    kind: StorageClass
+    name: local-path
+  register: default_sc
+  failed_when: 
+    - default_sc.resources[0].metadata.annotations['storageclass.kubernetes.io/is-default-class'] != "true"
