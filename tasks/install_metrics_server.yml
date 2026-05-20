@@ -1,17 +1,17 @@
 - name: Add metrics-server Helm repository
-  community.kubernetes.helm_repository:
+  kubernetes.core.helm_repository:
     name: metrics-server
     repo_url: https://kubernetes-sigs.github.io/metrics-server/
 
 - name: Update Helm repositories
-  community.kubernetes.helm_repository:
+  kubernetes.core.helm_repository:
     name: metrics-server
     repo_url: https://kubernetes-sigs.github.io/metrics-server/
     state: present
     force_update: yes
 
 - name: Install metrics-server using Helm
-  community.kubernetes.helm:
+  kubernetes.core.helm:
     name: metrics-server
     chart_ref: metrics-server/metrics-server
     release_namespace: kube-system
