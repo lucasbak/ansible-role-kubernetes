@@ -38,17 +38,13 @@
     dest: /usr/local/sbin/helm
     state: link
 
-- name: Ensure pip is present
-  package:
-    name: python3-pip
-    state: present
+- name: Ensure pip is present for the Ansible Python interpreter
+  ansible.builtin.command:
+    cmd: "{{ ansible_python_interpreter | default('/usr/bin/python3') }} -m ensurepip --upgrade"
   become: true
+  ignore_errors: true
 
 - name: Install Python kubernetes client on remote
-  pip:
-    name:
-      - kubernetes>=24.2.0
-      - pyyaml
-      - requests
-    state: present
+  ansible.builtin.command:
+    cmd: "{{ ansible_python_interpreter | default('/usr/bin/python3') }} -m pip install 'kubernetes>=24.2.0' pyyaml requests"
   become: true

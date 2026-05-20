@@ -110,7 +110,40 @@
   delay: 15
   when: inventory_hostname != "{{ k8s_masters | first }}"
 
-- name: Download Kubernetes admin.conf from first master
+- name: Check if kubeadm init output file exists on first master
+  stat:
+    path: /tmp/kubeadm_init_output.txt
+  register: kubeadm_init_output_stat
+  delegate_to: "{{ k8s_masters | first }}"
+  run_once: true
+
+- name: Regenerate kubeadm join tokens (re-run — cluster already initialized)
+  block:
+    - name: Upload certs and capture new certificate key
+      shell: kubeadm init phase upload-certs --upload-certs 2>&1 | tail -1
+      register: _new_cert_key
+    - name: Generate fresh worker join command
+      shell: kubeadm token create --print-join-command
+      register: _worker_join_cmd
+    - name: Write synthetic kubeadm init output with regenerated tokens
+      copy:
+        content: |
+          Your Kubernetes control-plane has initialized successfully!
+
+          You can now join any number of the control-plane node running the following command on each as root:
+
+            {{ _worker_join_cmd.stdout }} \
+                  --control-plane --certificate-key {{ _new_cert_key.stdout }}
+
+          Then you can join any number of worker nodes by running the following on each as root:
+
+          {{ _worker_join_cmd.stdout }}
+        dest: /tmp/kubeadm_init_output.txt
+  when: not kubeadm_init_output_stat.stat.exists
+  delegate_to: "{{ k8s_masters | first }}"
+  run_once: true
+
+- name: Fetch kubeadm init output from first master
   fetch:
     src: /tmp/kubeadm_init_output.txt
     dest: /tmp/kubeadm_init_output.txt
@@ -141,7 +174,7 @@
   register: kubeadm_join_cp
   when: inventory_hostname != "{{ k8s_masters | first }}" and inventory_hostname in k8s_masters
 
-- name: Download Kubernetes admin.conf from first master
+- name: Fetch admin.conf from first master
   fetch:
     src: /etc/kubernetes/admin.conf
     dest: /tmp/admin.conf

@@ -252,7 +252,7 @@
   when: k8s_controlplane_endpoint_ip not in ips
 
 - set_fact:
-    host_line: "{{ k8s_controlplane_endpoint_ip }} {{ hosts | selectattr('ip', 'equalto', k8s_controlplane_endpoint_ip) | map(attribute='shortname') | first }} {{ hosts | selectattr('ip', 'equalto', k8s_controlplane_endpoint_ip) | map(attribute='fqdn') | first }}  {{ k8s_controlplane_endpoint_hostname }}"
+    host_line: "{{ k8s_controlplane_endpoint_ip }} {{ hosts | selectattr('ip', 'equalto', k8s_controlplane_endpoint_ip) | map(attribute='fqdn') | first }}  {{ k8s_controlplane_endpoint_hostname }}"
   when: k8s_controlplane_endpoint_ip in ips
 
 - name: "[control-plane/worker]: Ensure entry for k8s_controlplane_endpoint_hostname exists in /etc/hosts"
