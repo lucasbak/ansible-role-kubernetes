@@ -1,3 +1,13 @@
+# Common facts — computed once on every host (master, worker, client) before any
+# CNI/install task can depend on them. Lifted out of setup.yml so client-only hosts
+# (which still need the pod CIDR for the Calico manifest patch) see them too.
+- name: Compute Kubernetes common facts
+  set_fact:
+    _k8s_api_advertise_address: "{{ hosts | selectattr('fqdn', 'equalto', inventory_hostname) | map(attribute='ip') | first | default(omit) }}"
+    _k8s_pod_network_cidr: "{{ k8s_pod_network_cidr | default('10.244.0.0/16') }}"
+    _k8s_service_cidr: "{{ k8s_service_cidr | default('10.96.0.0/12') }}"
+    _k8s_control_plane_endpoint: "{{ k8s_controlplane_endpoint_hostname | default('') }}"
+
 - set_fact:
     ips: "{{ hosts | map(attribute='ip')| list}}"
 

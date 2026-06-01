@@ -4,7 +4,11 @@ k8s_cert_dir: /etc/security/.ssl/kubernetes
 apache_log_dir: /var/log/apache2
 systemd_cgroup: "true"
 k8s_http_port: 80
-kubernetes_pod_network_cni: 'weave'
+kubernetes_pod_network_cni: 'weave'           # supported: weave | calico | cilium
+calico_version: 'v3.30.0'
+cilium_version: '1.18.0'
+cilium_kube_proxy_replacement: false           # set true to replace kube-proxy with Cilium's eBPF path
+                                               # (also requires removing the kube-proxy DaemonSet)
 etcd_conf_dir: /etc/etcd
 etcd_is_external: false
 loadbalancer_method: haproxy

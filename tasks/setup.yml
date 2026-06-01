@@ -2,11 +2,9 @@
 - name: Disable swap
   command: swapoff -a
 
-- set_fact:
-    _k8s_api_advertise_address: "{{ hosts | selectattr('fqdn', 'equalto', inventory_hostname) | map(attribute='ip') | first }}"
-    _k8s_pod_network_cidr: "{{ k8s_pod_network_cidr | default('10.244.0.0/16') }}"
-    _k8s_service_cidr: "{{ k8s_service_cidr | default('10.96.0.0/12') }}"
-    _k8s_control_plane_endpoint: "{{ k8s_controlplane_endpoint_hostname | default('') }}"
+# Note: _k8s_api_advertise_address / _k8s_pod_network_cidr / _k8s_service_cidr /
+# _k8s_control_plane_endpoint are now computed once in tasks/main.yml so client-only
+# hosts can rely on them too. Do not re-set them here.
 
 - name: Ensure entry for k8s_controlplane_endpoint_hostname exists in /etc/hosts
   ansible.builtin.lineinfile:
@@ -83,7 +81,12 @@
 #   until: result.stdout.find('is healthy') != -1
 
 - name: Initialize Kubernetes cluster
-  command: kubeadm init --config /root/kubeadm-config.yaml --upload-certs --node-name {{ inventory_hostname }} #--ignore-preflight-errors=FileAvailable--etc-kubernetes-manifests-etcd.yaml,Port-10250
+  command: >-
+    kubeadm init
+    --config /root/kubeadm-config.yaml
+    --upload-certs
+    --node-name {{ inventory_hostname }}
+    {% if kubernetes_pod_network_cni == 'cilium' and cilium_kube_proxy_replacement %}--skip-phases=addon/kube-proxy{% endif %}
   register: kubeadm_init
   when: inventory_hostname == "{{ k8s_masters | first }}" and not kube_scheduler_manifest.stat.exists
 
@@ -248,6 +251,98 @@
   changed_when: "'created' in weave_result.stdout"
   when: kubernetes_pod_network_cni == 'weave' and not((not(inventory_hostname in k8s_masters)) and (not (inventory_hostname in k8s_workers)))
   until: weave_result is succeeded
+
+# ---------------- CNI: Calico ----------------
+- name: "[kube-cni:calico] - Download Calico manifest"
+  get_url:
+    url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml"
+    dest: "/tmp/calico-{{ calico_version }}.yaml"
+    mode: '0644'
+    force: yes
+  when: kubernetes_pod_network_cni == 'calico' and inventory_hostname == k8s_masters | first
+
+- name: "[kube-cni:calico] - Uncomment IPV4POOL_CIDR env var name"
+  replace:
+    path: "/tmp/calico-{{ calico_version }}.yaml"
+    regexp: '^(\s*)# - name: CALICO_IPV4POOL_CIDR\s*$'
+    replace: '\1- name: CALICO_IPV4POOL_CIDR'
+  when: kubernetes_pod_network_cni == 'calico' and inventory_hostname == k8s_masters | first
+
+- name: "[kube-cni:calico] - Uncomment IPV4POOL_CIDR value and set cluster pod CIDR"
+  replace:
+    path: "/tmp/calico-{{ calico_version }}.yaml"
+    regexp: '^(\s*)#   value: "192\.168\.0\.0/16"\s*$'
+    replace: '\1  value: "{{ _k8s_pod_network_cidr }}"'
+  when: kubernetes_pod_network_cni == 'calico' and inventory_hostname == k8s_masters | first
+
+- name: "[kube-cni:calico] - Apply Calico manifest"
+  shell: kubectl apply -f /tmp/calico-{{ calico_version }}.yaml
+  register: calico_result
+  changed_when: "'created' in calico_result.stdout or 'configured' in calico_result.stdout"
+  until: calico_result is succeeded
+  retries: 6
+  delay: 10
+  when: kubernetes_pod_network_cni == 'calico' and inventory_hostname == k8s_masters | first
+
+# ---------------- CNI: Cilium ----------------
+- name: "[kube-cni:cilium] - Ensure Helm is installed (required for Cilium chart install)"
+  include_tasks: install_helm.yml
+  when: kubernetes_pod_network_cni == 'cilium' and inventory_hostname == k8s_masters | first
+
+- name: "[kube-cni:cilium] - Add Cilium Helm repo"
+  shell: helm repo add cilium https://helm.cilium.io/ && helm repo update cilium
+  register: cilium_repo
+  changed_when: "'has been added' in cilium_repo.stdout"
+  when: kubernetes_pod_network_cni == 'cilium' and inventory_hostname == k8s_masters | first
+
+# When kubeProxyReplacement is on, Cilium needs kube-proxy GONE before it installs:
+#   - Fresh install: kubeadm init --skip-phases=addon/kube-proxy already prevented its creation,
+#     so this is a no-op (--ignore-not-found).
+#   - Migration from a non-replacement config: this removes the existing kube-proxy DS + CM.
+- name: "[kube-cni:cilium] - Remove kube-proxy DaemonSet (kubeProxyReplacement=true)"
+  shell: kubectl -n kube-system delete daemonset kube-proxy --ignore-not-found=true
+  register: kp_ds_delete
+  changed_when: "'deleted' in kp_ds_delete.stdout"
+  when:
+    - kubernetes_pod_network_cni == 'cilium'
+    - cilium_kube_proxy_replacement
+    - inventory_hostname == k8s_masters | first
+
+- name: "[kube-cni:cilium] - Remove kube-proxy ConfigMap (kubeProxyReplacement=true)"
+  shell: kubectl -n kube-system delete configmap kube-proxy --ignore-not-found=true
+  register: kp_cm_delete
+  changed_when: "'deleted' in kp_cm_delete.stdout"
+  when:
+    - kubernetes_pod_network_cni == 'cilium'
+    - cilium_kube_proxy_replacement
+    - inventory_hostname == k8s_masters | first
+
+- name: "[kube-cni:cilium] - Flush stale iptables rules left by kube-proxy (kubeProxyReplacement=true)"
+  shell: |
+    iptables-save | grep -vE 'KUBE-|cali-|CILIUM-' | iptables-restore || true
+  when:
+    - kubernetes_pod_network_cni == 'cilium'
+    - cilium_kube_proxy_replacement
+    - inventory_hostname in k8s_masters or inventory_hostname in k8s_workers
+  changed_when: false
+
+- name: "[kube-cni:cilium] - Install Cilium via Helm"
+  shell: >
+    helm upgrade --install cilium cilium/cilium
+    --version {{ cilium_version }}
+    --namespace kube-system
+    --set ipam.mode=kubernetes
+    --set kubeProxyReplacement={{ 'true' if cilium_kube_proxy_replacement else 'false' }}
+    {% if cilium_kube_proxy_replacement %}
+    --set k8sServiceHost={{ k8s_controlplane_endpoint_ip }}
+    --set k8sServicePort=6443
+    {% endif %}
+  register: cilium_result
+  changed_when: "'STATUS: deployed' in cilium_result.stdout"
+  until: cilium_result is succeeded
+  retries: 6
+  delay: 10
+  when: kubernetes_pod_network_cni == 'cilium' and inventory_hostname == k8s_masters | first
 
 - name: Import kubernetes ca into java keystore
   shell: >
